@@ -5,10 +5,6 @@ from datetime import datetime
 import bcrypt
 import os
 
-# Avoid gRPC and Chroma lock noise
-os.environ["GRPC_VERBOSITY"] = "ERROR"
-os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "false"
-
 # LangChain imports
 from langchain_community.vectorstores import FAISS
 from langchain_community.chat_message_histories import ChatMessageHistory
@@ -18,9 +14,9 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import TextLoader
 from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.schema import Document
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -68,7 +64,7 @@ messages = Table(
     Column("timestamp", DateTime, default=datetime.utcnow)
 )
 
-# ✅ New Table for Prompts and Answers
+# ✅ Table for Prompts and Answers
 prompt_answer = Table(
     "prompt_answer", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
@@ -79,6 +75,25 @@ prompt_answer = Table(
 
 metadata.create_all(engine)
 SessionLocal = sessionmaker(bind=engine)
+
+# ------------------------
+# Initialize sample data
+# ------------------------
+def initialize_sample_prompts():
+    db = SessionLocal()
+    existing = db.execute(select(prompt_answer)).fetchall()
+    if not existing:
+        samples = [
+            {"prompt": "What is AI?", "answer": "AI stands for Artificial Intelligence, the simulation of human intelligence by machines."},
+            {"prompt": "What is Python?", "answer": "Python is a popular programming language used for web, data science, and AI applications."},
+            {"prompt": "What is Streamlit?", "answer": "Streamlit is a Python framework for building interactive web apps easily."},
+            {"prompt": "What is Machine Learning?", "answer": "Machine learning is a subset of AI that enables systems to learn from data without being explicitly programmed."},
+        ]
+        db.execute(insert(prompt_answer), samples)
+        db.commit()
+    db.close()
+
+initialize_sample_prompts()
 
 # ------------------------
 # Authentication Helpers
@@ -116,18 +131,28 @@ if "language" not in st.session_state:
 if "store" not in st.session_state:
     st.session_state.store = {}
 
-st.set_page_config(page_title="RAG PDF Chat App", layout="wide")
-st.title("💬 Conversational RAG with PDF and Language Selection")
+st.set_page_config(page_title="RAG DB Chat App", layout="wide")
+st.title("🧠 Conversational RAG with Database")
 
 # ------------------------
-# Helper: Save Prompt & Answer to Database
+# Helper: Save Prompt & Answer
 # ------------------------
 def save_prompt_to_db(prompt: str, answer: str):
-    """Store the user prompt and assistant answer in the database."""
     db = SessionLocal()
     db.execute(insert(prompt_answer).values(prompt=prompt, answer=answer))
     db.commit()
     db.close()
+
+# ------------------------
+# Database Loader Function
+# ------------------------
+def load_documents_from_db():
+    """Load prompt-answer pairs as LangChain Documents."""
+    db = SessionLocal()
+    rows = db.execute(select(prompt_answer)).fetchall()
+    db.close()
+    docs = [Document(page_content=row.answer, metadata={"prompt": row.prompt}) for row in rows]
+    return docs
 
 # ------------------------
 # Login / Signup
@@ -167,21 +192,19 @@ else:
         index=0 if st.session_state.language == "English" else 1
     )
 
-    # Load Text File
-    path = f"./data.txt"
-    loader = TextLoader(path)
-    docs = loader.load()
-
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    splits = text_splitter.split_documents(docs)
-    vectorstore = FAISS.from_documents(splits, embeddings)
-    retriever = vectorstore.as_retriever()
+    # Load documents from DB
+    docs = load_documents_from_db()
+    if not docs:
+        st.warning("No data found in database yet.")
+    else:
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        splits = text_splitter.split_documents(docs)
+        vectorstore = FAISS.from_documents(splits, embeddings)
+        retriever = vectorstore.as_retriever()
 
     # Sidebar Conversations
     st.sidebar.title("💬 Your Conversations")
-    convs = db.execute(
-        select(conversations).where(conversations.c.user_id == st.session_state.user_id)
-    ).fetchall()
+    convs = db.execute(select(conversations).where(conversations.c.user_id == st.session_state.user_id)).fetchall()
 
     for conv in convs:
         col1, col2 = st.sidebar.columns([3, 1])
@@ -234,11 +257,9 @@ else:
 
         system_prompt = (
             f"You are an assistant for question-answering tasks. "
-            f"Use only the information available in the provided text file content to answer the user's question. "
-            f"If the answer is not present in the text file, strictly respond with "
-            f"'{dont_know_responses[selected_lang]}' "
-            f"in {selected_lang} language. "
-            f"Keep the answer concise (maximum 3 sentences). "
+            f"Use only the information available in the provided database to answer the user's question. "
+            f"If the answer is not present, strictly respond with '{dont_know_responses[selected_lang]}' "
+            f"in {selected_lang} language. Keep the answer concise (max 3 sentences). "
             f"Always respond in {selected_lang} language.\n\n{{context}}"
         )
 
@@ -260,44 +281,45 @@ else:
             output_messages_key="answer"
         )
 
-        # Display previous messages
         for msg in st.session_state.messages:
             st.chat_message(msg["role"]).write(msg["content"])
 
-        # Chat input
-        lang_placeholder = (
-            "Enter your question..." if st.session_state.language == "English" else "अपना प्रश्न दर्ज करें..."
-        )
-        if prompt := st.chat_input(lang_placeholder):
+        if prompt := st.chat_input("Ask something..."):
             st.chat_message("user").write(prompt)
             st.session_state.messages.append({"role": "user", "content": prompt})
 
-            with st.spinner("Thinking..."):
-                session_history = get_session_history(str(st.session_state.active_conversation))
-                response = conversational_rag_chain.invoke(
-                    {"input": prompt},
-                    config={"configurable": {"session_id": str(st.session_state.active_conversation)}}
-                )
-                answer = response["answer"]
-                st.chat_message("assistant").write(answer)
-                st.session_state.messages.append({"role": "assistant", "content": answer})
+            # Check if prompt already exists
+            db = SessionLocal()
+            existing = db.execute(select(prompt_answer).where(prompt_answer.c.prompt == prompt)).fetchone()
 
-                # ✅ Save prompt and answer to new table
-                save_prompt_to_db(prompt, answer)
+            if existing:
+                answer = existing.answer
+            else:
+                with st.spinner("Thinking..."):
+                    session_history = get_session_history(str(st.session_state.active_conversation))
+                    response = conversational_rag_chain.invoke(
+                        {"input": prompt},
+                        config={"configurable": {"session_id": str(st.session_state.active_conversation)}}
+                    )
+                    answer = response["answer"]
+                    # Save new Q&A to DB
+                    save_prompt_to_db(prompt, answer)
 
-                # Save chat to DB
-                if st.session_state.active_conversation:
-                    db.execute(insert(messages).values(
-                        conversation_id=st.session_state.active_conversation,
-                        role="user",
-                        content=prompt,
-                        timestamp=datetime.utcnow()
-                    ))
-                    db.execute(insert(messages).values(
-                        conversation_id=st.session_state.active_conversation,
-                        role="assistant",
-                        content=answer,
-                        timestamp=datetime.utcnow()
-                    ))
-                    db.commit()
+            st.chat_message("assistant").write(answer)
+            st.session_state.messages.append({"role": "assistant", "content": answer})
 
+            # Save chat to DB
+            if st.session_state.active_conversation:
+                db.execute(insert(messages).values(
+                    conversation_id=st.session_state.active_conversation,
+                    role="user",
+                    content=prompt,
+                    timestamp=datetime.utcnow()
+                ))
+                db.execute(insert(messages).values(
+                    conversation_id=st.session_state.active_conversation,
+                    role="assistant",
+                    content=answer,
+                    timestamp=datetime.utcnow()
+                ))
+                db.commit()

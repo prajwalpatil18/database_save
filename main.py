@@ -366,6 +366,7 @@ else:
                 st.chat_message("user").write(prompt)
                 st.session_state.messages.append({"role": "user", "content": prompt})
 
+                existing = db.execute(select(prompt_answer).where(prompt_answer.c.prompt == prompt)).fetchone()
 
                 rows = db.execute(select(prompt_answer)).fetchall()
                 docs = [Document(page_content=row.answer, metadata={"prompt": row.prompt}) for row in rows]
@@ -377,41 +378,36 @@ else:
                     splits = text_splitter.split_documents(docs)
                     vectorstore = FAISS.from_documents(splits, embeddings)
                     retriever = vectorstore.as_retriever()
-    
-                # Update conversation title if new
+                if existing:
+                    answer = existing.answer
+                else:
+                    with st.spinner("Thinking..."):
+                        session_history = get_session_history(str(st.session_state.active_conversation))
+                        response = conversational_rag_chain.invoke(
+                            {"input": prompt},
+                            config={"configurable": {"session_id": str(st.session_state.active_conversation)}}
+                        )
+                        answer = response["answer"]
+                        db.execute(insert(prompt_answer).values(prompt=prompt, answer=answer))
+                        db.commit()
+
+                st.chat_message("assistant").write(answer)
+                st.session_state.messages.append({"role": "assistant", "content": answer})
+
                 if st.session_state.active_conversation:
-                    conv_id = st.session_state.active_conversation
-                    conv_row = db.execute(select(conversations).where(conversations.c.id == conv_id)).fetchone()
-                    if conv_row.title == "New Chat":
-                        title_short = prompt if len(prompt) <= 30 else prompt[:30] + "..."
-                        db.execute(update(conversations).where(conversations.c.id == conv_id).values(title=title_short))
-                        db.commit()
-    
-                with st.spinner("Thinking..."):
-                    session_history = get_session_history(str(st.session_state.active_conversation))
-                    response = conversational_rag_chain.invoke(
-                        {"input": prompt},
-                        config={"configurable": {"session_id": str(st.session_state.active_conversation)}}
-                    )
-                    answer = response["answer"]
-                    st.chat_message("assistant").write(answer)
-                    st.session_state.messages.append({"role": "assistant", "content": answer})
-    
-                    # Save chat to DB
-                    if st.session_state.active_conversation:
-                        db.execute(insert(messages).values(
-                            conversation_id=st.session_state.active_conversation,
-                            role="user",
-                            content=prompt,
-                            timestamp=datetime.utcnow()
-                        ))
-                        db.execute(insert(messages).values(
-                            conversation_id=st.session_state.active_conversation,
-                            role="assistant",
-                            content=answer,
-                            timestamp=datetime.utcnow()
-                        ))
-                        db.commit()
+                    db.execute(insert(messages).values(
+                        conversation_id=st.session_state.active_conversation,
+                        role="user",
+                        content=prompt,
+                        timestamp=datetime.utcnow()
+                    ))
+                    db.execute(insert(messages).values(
+                        conversation_id=st.session_state.active_conversation,
+                        role="assistant",
+                        content=answer,
+                        timestamp=datetime.utcnow()
+                    ))
+                    db.commit()
 
 
 

@@ -366,6 +366,17 @@ else:
                     answer = existing.answer
                 else:
                     with st.spinner("Thinking..."):
+                        
+                        rows = db.execute(select(prompt_answer)).fetchall()
+                        docs = [Document(page_content=row.answer, metadata={"prompt": row.prompt}) for row in rows]
+                
+                        if not docs:
+                            st.warning("No data found.")
+                        else:
+                            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+                            splits = text_splitter.split_documents(docs)
+                            vectorstore = FAISS.from_documents(splits, embeddings)
+                            retriever = vectorstore.as_retriever()
                         session_history = get_session_history(str(st.session_state.active_conversation))
                         response = conversational_rag_chain.invoke(
                             {"input": prompt},

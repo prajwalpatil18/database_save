@@ -378,6 +378,7 @@ else:
                 if not docs:
                     st.warning("No data found.")
                 else:
+                    embeddings = get_embeddings()
                     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
                     splits = text_splitter.split_documents(docs)
                     vectorstore = FAISS.from_documents(splits, embeddings)

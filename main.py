@@ -26,10 +26,14 @@ load_dotenv()
 # ------------------------
 os.environ['HF_TOKEN'] = os.getenv("HF_TOKEN")
 
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2",
-    model_kwargs={"device": "cpu"}
-)
+@st.cache_resource  # Instead of creating it on every run, cache it globally using Streamlit’s cache
+def get_embeddings():
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={"device": "cpu"}
+    )
+
+embeddings = get_embeddings()
 
 groq_api_key = os.getenv("API_KEY")
 llm = ChatGroq(groq_api_key=groq_api_key, model_name="llama-3.1-8b-instant")

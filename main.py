@@ -337,6 +337,7 @@ else:
                 f"Use only the information available in the provided database to answer the user's question. "
                 f"If the answer is not present, strictly respond with '{dont_know_responses[selected_lang]}' "
                 f"If the context is in database then strictly respond in {selected_lang} language. Keep the answer concise (max 3 sentences). "
+                f"The user may ask questions related to the provided context. You should respond intelligently, even if only a small portion of the context exists in the database, and strictly reply in {selected_lang}."
                 f"Always strictly respond in {selected_lang} language.\n\n{{context}}"
             )
 

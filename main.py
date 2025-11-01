@@ -26,7 +26,7 @@ load_dotenv()
 # ------------------------
 os.environ['HF_TOKEN'] = os.getenv("HF_TOKEN")
 
-@st.cache_resource  # Instead of creating it on every run, cache it globally using Streamlit’s cache
+@st.cache_resource  # cache resource globally using Streamlit’s cache
 def get_embeddings():
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2",
@@ -72,7 +72,7 @@ messages = Table(
     Column("timestamp", DateTime, default=datetime.utcnow)
 )
 
-# ✅ Table for Prompts and Answers
+# Table for Prompts and Answers
 prompt_answer = Table(
     "prompt_answer", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
@@ -110,61 +110,105 @@ def signup_user(username, password):
     db = SessionLocal()
     existing = db.execute(select(users).where(users.c.username == username)).fetchone()
     if existing:
+        db.close()
         return False, "Username already exists"
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     db.execute(insert(users).values(username=username, password_hash=hashed))
     db.commit()
+    db.close()
     return True, "Signup successful"
 
 def login_user(username, password):
     db = SessionLocal()
     user = db.execute(select(users).where(users.c.username == username)).fetchone()
+    # Admin bypass - NOTE: keep as you intended; can change later
     if username == "Prajwal":
-        return True, 1  # Admin bypass
+        db.close()
+        return True, 1  # Admin bypass (user id 1)
     if user and bcrypt.checkpw(password.encode(), user.password_hash.encode()):
-        return True, user.id
+        uid = user.id
+        db.close()
+        return True, uid
+    db.close()
     return False, None
 
 # ------------------------
-# Admin Dashboard (embedded)
+# Admin Dashboard (embedded) - extended with edit/delete
 # ------------------------
 def admin_dashboard():
     db = SessionLocal()
     st.title("🧠 Admin Dashboard – Manage Prompt & Answer Database")
     st.sidebar.title("⚙️ Admin Actions")
-    action = st.sidebar.radio("Select Action:", ["View Database", "Add or Update Answer", "Logout"])
+    action = st.sidebar.radio("Select Action:", ["View Database", "Add Prompt/Answer", "Logout"])
 
-    # View Data
+    # View Data with edit/delete
     if action == "View Database":
         st.subheader("📋 Prompt–Answer Table")
-        data = db.execute(select(prompt_answer)).fetchall()
-        if not data:
+        rows = db.execute(select(prompt_answer)).fetchall()
+        if not rows:
             st.warning("No records found.")
         else:
-            st.dataframe(
-                [{"ID": row.id, "Prompt": row.prompt, "Answer": row.answer, "Timestamp": row.timestamp} for row in data]
-            )
+            # Show a compact table and allow editing row-by-row using expanders
+            for row in rows:
+                with st.expander(f"ID {row.id} — Prompt: {row.prompt[:60]}{'...' if len(row.prompt) > 60 else ''}"):
+                    st.write("**Prompt:**")
+                    prompt_text = st.text_area("Prompt", value=row.prompt, key=f"prompt_{row.id}")
+                    st.write("**Answer:**")
+                    answer_text = st.text_area("Answer", value=row.answer, key=f"answer_{row.id}")
+                    col1, col2, col3 = st.columns([1,1,1])
+                    with col1:
+                        if st.button("Save Changes", key=f"save_{row.id}"):
+                            if not prompt_text.strip() or not answer_text.strip():
+                                st.warning("Both fields are required.")
+                            else:
+                                # If prompt changed to a value that already exists under a different id, prevent duplicate keys
+                                existing_same_prompt = db.execute(
+                                    select(prompt_answer).where(prompt_answer.c.prompt == prompt_text).where(prompt_answer.c.id != row.id)
+                                ).fetchone()
+                                if existing_same_prompt:
+                                    st.error("Another record already uses this prompt. Choose a different prompt (duplicates are not allowed).")
+                                else:
+                                    db.execute(update(prompt_answer).where(prompt_answer.c.id == row.id)
+                                               .values(prompt=prompt_text, answer=answer_text, timestamp=datetime.utcnow()))
+                                    db.commit()
+                                    st.success("Updated successfully!")
+                                    st.experimental_rerun()
+                    with col2:
+                        if st.button("Delete Row", key=f"delrow_{row.id}"):
+                            # delete row and any references? Only prompt_answer table, fine
+                            db.execute(delete(prompt_answer).where(prompt_answer.c.id == row.id))
+                            db.commit()
+                            st.success("Deleted successfully!")
+                            st.experimental_rerun()
+                    with col3:
+                        if st.button("Copy Prompt", key=f"copy_{row.id}"):
+                            st.write("Prompt copied to clipboard area below (use it in Add Prompt/Answer).")
+                            st.session_state.admin_clipboard = prompt_text
+            # clipboard area
+            st.markdown("---")
+            st.write("Admin clipboard (paste into Add Prompt/Answer if needed):")
+            st.text_area("Clipboard", value=st.session_state.get("admin_clipboard", ""), key="admin_clipboard_area")
 
-    # Add / Update Data
-    elif action == "Add or Update Answer":
-        st.subheader("✍️ Add / Update Prompt–Answer")
-        prompt_text = st.text_area("Enter Prompt")
+    # Add Prompt/Answer
+    elif action == "Add Prompt/Answer":
+        st.subheader("✍️ Add Prompt–Answer")
+        # allow prefill from clipboard
+        prompt_text = st.text_area("Enter Prompt", value=st.session_state.get("admin_clipboard", ""))
         answer_text = st.text_area("Enter Answer")
         if st.button("Save to Database"):
             if not prompt_text.strip() or not answer_text.strip():
                 st.warning("Both fields are required.")
             else:
+                # Prevent duplicates: exact match on prompt
                 existing = db.execute(select(prompt_answer).where(prompt_answer.c.prompt == prompt_text)).fetchone()
                 if existing:
-                    db.execute(update(prompt_answer)
-                               .where(prompt_answer.c.prompt == prompt_text)
-                               .values(answer=answer_text, timestamp=datetime.utcnow()))
-                    st.success("✅ Updated successfully!")
+                    st.error("A record with this exact prompt already exists. Use View Database to edit it.")
                 else:
-                    db.execute(insert(prompt_answer)
-                               .values(prompt=prompt_text, answer=answer_text, timestamp=datetime.utcnow()))
+                    db.execute(insert(prompt_answer).values(prompt=prompt_text, answer=answer_text, timestamp=datetime.utcnow()))
+                    db.commit()
                     st.success("✅ Added successfully!")
-                db.commit()
+                    st.session_state.admin_clipboard = ""  # clear clipboard after add
+                    st.experimental_rerun()
 
     elif action == "Logout":
         st.session_state.page = "main"
@@ -191,6 +235,7 @@ if "store" not in st.session_state:
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
+# for keeping UI consistent
 st.set_page_config(page_title="RAG DB Chat App", layout="wide")
 
 # ------------------------
@@ -264,8 +309,8 @@ else:
         st.sidebar.subheader("🌐 Choose Response Language")
         st.session_state.language = st.sidebar.radio(
             "Select a language for responses:",
-            ["English", "Hindi"],
-            index=0 if st.session_state.language == "English" else 1
+            ["English", "Hindi", "Marathi"],
+            index=0 if st.session_state.language == "English" else (1 if st.session_state.language == "Hindi" else 2)
         )
 
         # Load docs
@@ -273,25 +318,28 @@ else:
         docs = [Document(page_content=row.answer, metadata={"prompt": row.prompt}) for row in rows]
 
         if not docs:
-            st.warning("No data found.")
+            st.warning("No data found in the knowledge DB.")
+            retriever = None
         else:
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
             splits = text_splitter.split_documents(docs)
             vectorstore = FAISS.from_documents(splits, embeddings)
             retriever = vectorstore.as_retriever()
 
+        # Sidebar: Conversations list (like ChatGPT)
         st.sidebar.title("💬 Conversations")
-        convs = db.execute(select(conversations).where(conversations.c.user_id == st.session_state.user_id)).fetchall()
+        convs = db.execute(select(conversations).where(conversations.c.user_id == st.session_state.user_id).order_by(conversations.c.created_at.desc())).fetchall()
 
+        # show each conversation with its title (first question) and allow deleting
         for conv in convs:
-            col1, col2 = st.sidebar.columns([3, 1])
+            col1, col2 = st.sidebar.columns([4,1])
             with col1:
                 if st.button(conv.title, key=f"conv_{conv.id}"):
                     st.session_state.active_conversation = conv.id
-                    st.session_state.messages = [
-                        {"role": m.role, "content": m.content}
-                        for m in db.execute(select(messages).where(messages.c.conversation_id == conv.id)).fetchall()
-                    ]
+                    # load conversation messages
+                    msgs = db.execute(select(messages).where(messages.c.conversation_id == conv.id).order_by(messages.c.timestamp)).fetchall()
+                    st.session_state.messages = [{"role": m.role, "content": m.content} for m in msgs]
+                    st.experimental_rerun()
             with col2:
                 if st.button("🗑️", key=f"del_{conv.id}"):
                     db.execute(delete(messages).where(messages.c.conversation_id == conv.id))
@@ -301,21 +349,25 @@ else:
                         st.session_state.active_conversation = None
                         st.session_state.messages = []
                     st.success(f"Conversation '{conv.title}' deleted.")
-                    st.rerun()
+                    st.experimental_rerun()
 
         if st.sidebar.button("➕ New Chat"):
-            result = db.execute(insert(conversations).values(user_id=st.session_state.user_id, title="New Chat"))
+            # create a placeholder conversation; title will be set to first prompt when user enters it
+            result = db.execute(insert(conversations).values(user_id=st.session_state.user_id, title="New Chat", created_at=datetime.utcnow()))
             db.commit()
-            st.session_state.active_conversation = result.inserted_primary_key[0]
+            new_conv_id = result.inserted_primary_key[0]
+            st.session_state.active_conversation = new_conv_id
             st.session_state.messages = []
+            st.experimental_rerun()
 
         if st.sidebar.button("🚪 Logout"):
             st.session_state.user_id = None
             st.session_state.active_conversation = None
             st.session_state.messages = []
-            st.rerun()
+            st.experimental_rerun()
 
-        if docs:
+        # Build RAG components if retriever exists
+        if retriever:
             contextualize_q_system_prompt = (
                 "Given a chat history and the latest user question, "
                 "formulate a standalone question that can be understood "
@@ -329,7 +381,8 @@ else:
             selected_lang = st.session_state.language
             dont_know_responses = {
                 "English": "I don't know about this.",
-                "Hindi": "मुझे नहीं पता।"
+                "Hindi": "मुझे नहीं पता।",
+                "Marathi": "मला याबद्दल माहिती नाही."
             }
 
             system_prompt = (
@@ -358,34 +411,73 @@ else:
                 history_messages_key="chat_history",
                 output_messages_key="answer"
             )
+        else:
+            conversational_rag_chain = None
 
-            for msg in st.session_state.messages:
-                st.chat_message(msg["role"]).write(msg["content"])
-            
+        # Render existing messages in chat window
+        for msg in st.session_state.messages:
+            st.chat_message(msg["role"]).write(msg["content"])
 
-            lang_placeholder = (
-            "Enter your question..." if st.session_state.language == "English" else "अपना प्रश्न दर्ज करें..."
+        lang_placeholder = (
+            "Enter your question..." if st.session_state.language == "English"
+            else ("अपना प्रश्न दर्ज करें..." if st.session_state.language == "Hindi" else "आपला प्रश्न टाका...")
         )
-            
-            if prompt := st.chat_input(lang_placeholder):
-                st.chat_message("user").write(prompt)
-                st.session_state.messages.append({"role": "user", "content": prompt})
 
-                existing = db.execute(select(prompt_answer).where(prompt_answer.c.prompt == prompt)).fetchone()
+        if prompt := st.chat_input(lang_placeholder):
+            # write user message to UI & session
+            st.chat_message("user").write(prompt)
+            st.session_state.messages.append({"role": "user", "content": prompt})
 
-                rows = db.execute(select(prompt_answer)).fetchall()
-                docs = [Document(page_content=row.answer, metadata={"prompt": row.prompt}) for row in rows]
-        
-                if not docs:
-                    st.warning("No data found.")
-                else:
-                    embeddings = get_embeddings()
-                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-                    splits = text_splitter.split_documents(docs)
-                    vectorstore = FAISS.from_documents(splits, embeddings)
-                    retriever = vectorstore.as_retriever()
-                if existing:
-                    answer = existing.answer
+            # if there's no active conversation, create one now and set its title to the first prompt
+            if not st.session_state.active_conversation:
+                result = db.execute(insert(conversations).values(user_id=st.session_state.user_id, title=prompt[:200], created_at=datetime.utcnow()))
+                db.commit()
+                st.session_state.active_conversation = result.inserted_primary_key[0]
+            else:
+                # If active conversation has default "New Chat" or "New Chat" title, and has no messages, set it to this prompt
+                conv_row = db.execute(select(conversations).where(conversations.c.id == st.session_state.active_conversation)).fetchone()
+                if conv_row and (not conv_row.title or conv_row.title == "New Chat"):
+                    db.execute(update(conversations).where(conversations.c.id == st.session_state.active_conversation).values(title=prompt[:200]))
+                    db.commit()
+
+            # First check for existing prompt (exact match). If exists, do NOT save duplicate later
+            existing = db.execute(select(prompt_answer).where(prompt_answer.c.prompt == prompt)).fetchone()
+
+            # Rebuild docs & retriever for up-to-date DB (in case admin changed it during session)
+            rows = db.execute(select(prompt_answer)).fetchall()
+            docs = [Document(page_content=row.answer, metadata={"prompt": row.prompt}) for row in rows]
+            if not docs:
+                st.warning("No data found in the knowledge DB.")
+            else:
+                embeddings = get_embeddings()
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+                splits = text_splitter.split_documents(docs)
+                vectorstore = FAISS.from_documents(splits, embeddings)
+                retriever = vectorstore.as_retriever()
+
+                # rebuild conversational rag chain because retriever changed
+                contextualize_q_prompt = ChatPromptTemplate.from_messages(
+                    [("system", contextualize_q_system_prompt), MessagesPlaceholder("chat_history"), ("human", "{input}")]
+                )
+                history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
+                qa_prompt = ChatPromptTemplate.from_messages(
+                    [("system", system_prompt), MessagesPlaceholder("chat_history"), ("human", "{input}")]
+                )
+                question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+                rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+                conversational_rag_chain = RunnableWithMessageHistory(
+                    rag_chain, get_session_history,
+                    input_messages_key="input",
+                    history_messages_key="chat_history",
+                    output_messages_key="answer"
+                )
+
+            # If exact existing prompt found, use its answer and DO NOT insert a duplicate
+            if existing:
+                answer = existing.answer
+            else:
+                if conversational_rag_chain is None:
+                    answer = dont_know_responses[st.session_state.language]
                 else:
                     with st.spinner("Thinking..."):
                         session_history = get_session_history(str(st.session_state.active_conversation))
@@ -394,50 +486,35 @@ else:
                             config={"configurable": {"session_id": str(st.session_state.active_conversation)}}
                         )
                         answer = response["answer"]
-                        db.execute(insert(prompt_answer).values(prompt=prompt, answer=answer))
-                        db.commit()
 
-                st.chat_message("assistant").write(answer)
-                st.session_state.messages.append({"role": "assistant", "content": answer})
-
-                if st.session_state.active_conversation:
-                    db.execute(insert(messages).values(
-                        conversation_id=st.session_state.active_conversation,
-                        role="user",
-                        content=prompt,
-                        timestamp=datetime.utcnow()
-                    ))
-                    db.execute(insert(messages).values(
-                        conversation_id=st.session_state.active_conversation,
-                        role="assistant",
-                        content=answer,
-                        timestamp=datetime.utcnow()
-                    ))
+                # Save new prompt-answer pair only if it doesn't already exist (double-check) and answer is not empty
+                existing_check = db.execute(select(prompt_answer).where(prompt_answer.c.prompt == prompt)).fetchone()
+                if not existing_check and answer and answer.strip() and answer not in [dont_know_responses["English"], dont_know_responses["Hindi"], dont_know_responses["Marathi"]]:
+                    # Insert new QA pair
+                    db.execute(insert(prompt_answer).values(prompt=prompt, answer=answer, timestamp=datetime.utcnow()))
                     db.commit()
 
+            # Show assistant message
+            st.chat_message("assistant").write(answer)
+            st.session_state.messages.append({"role": "assistant", "content": answer})
 
+            # Persist messages into messages table for the active conversation
+            if st.session_state.active_conversation:
+                db.execute(insert(messages).values(
+                    conversation_id=st.session_state.active_conversation,
+                    role="user",
+                    content=prompt,
+                    timestamp=datetime.utcnow()
+                ))
+                db.execute(insert(messages).values(
+                    conversation_id=st.session_state.active_conversation,
+                    role="assistant",
+                    content=answer,
+                    timestamp=datetime.utcnow()
+                ))
+                db.commit()
 
+            # after message, refresh sidebar conversation list so title changes appear
+            st.experimental_rerun()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        db.close()

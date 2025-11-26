@@ -44,3 +44,5 @@ fpdf
 PyPDF2 
 reportlab
 requests>=2.31.0
+fastapi
+uvicorn

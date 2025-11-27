@@ -1,28 +1,41 @@
+# LangChain Ecosystem
+langchain==0.3.0
+langchain-core>=0.3.29
+langchain-community==0.3.0
+langchain-openai==0.3.0
+langchain-text-splitters
+langchain-huggingface
+langchain-chroma
+langchain-groq
+
+# Vector DBs / Embeddings
+faiss-cpu
+chromadb
+sentence_transformers
+huggingface_hub
+
+# Data tools
+pandas
+duckdb
+pypdf
+pymupdf
+wikipedia
+arxiv
+
+# Web/Utils
+duckduckgo-search
+validators==0.28.1
+
+# Database
+mysql-connector-python
+sqlalchemy
+
+# API
 fastapi
 uvicorn
 
-langchain==0.2.11
-langchain-community==0.2.10
-langchain-groq
-langchain-openai
-langchain-text-splitters
-
-faiss-cpu
-
-pypdf
-PyPDF2
-bs4
-arxiv
-wikipedia
-pandas
-requests
+# Other
 python-dotenv
-
-sqlalchemy
-mysql-connector-python
-
-huggingface_hub
-langchain-huggingface
-
-duckduckgo-search
-validators==0.28.1
+openai
+PyJWT
+python-multipart
